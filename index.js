@@ -1,16 +1,18 @@
 // Server-online/index.js
 
+require('dotenv').config(); // Asegúrate de que esta línea esté al principio para leer .env localmente
+
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const admin = require('firebase-admin');
-const XLSX = require('xlsx');
+const admin = require('firebase-admin'); // Importa Firebase Admin SDK
+const XLSX = require('xlsx'); // Importa la librería xlsx
 
 const app = express();
-const PORT = process.env.PORT || 10000; // Use port from environment variable or default to 10000
+const PORT = process.env.PORT || 10000; // Usa el puerto de la variable de entorno o 10000 por defecto
 
-// Initialize Firebase Admin SDK
-// Render.com will provide GOOGLE_APPLICATION_CREDENTIALS_JSON as an environment variable
+// Inicializa Firebase Admin SDK
+// Render.com proporcionará GOOGLE_APPLICATION_CREDENTIALS_JSON como variable de entorno
 if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
     try {
         const serviceAccount = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
@@ -20,39 +22,79 @@ if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
         console.log('Firebase Admin SDK inicializado correctamente desde la variable de entorno.');
     } catch (error) {
         console.error('Error al parsear GOOGLE_APPLICATION_CREDENTIALS_JSON:', error);
-        process.exit(1); // Exit if credentials are bad
+        process.exit(1); // Sale si las credenciales son incorrectas
     }
 } else {
     console.error('La variable de entorno GOOGLE_APPLICATION_CREDENTIALS_JSON no está definida.');
-    console.error('Asegúrate de configurar las credenciales de Firebase en Render.com.');
-    process.exit(1); // Exit if credentials are not set
+    console.error('Asegúrate de configurar las credenciales de Firebase en Render.com o en un archivo .env local.');
+    process.exit(1); // Sale si las credenciales no están configuradas
 }
 
-const db = admin.firestore();
+const db = admin.firestore(); // Obtiene la instancia de Firestore
 
-// Middleware
+// Middlewares
 app.use(bodyParser.json());
 // Configuración CORS más específica para producción
 app.use(cors({
-    origin: ['http://localhost:3000', 'https://aljulio.github.io'], // <--- Asegúrate que esta URL sea correcta para tu frontend
+    origin: ['http://localhost:3000', 'https://aljulio.github.io'], // Asegúrate que esta URL sea correcta para tu frontend
     methods: ['GET', 'POST'],
     allowedHeaders: ['Content-Type'],
 }));
 
-
-// ***** RUTA ÚNICA: Guardar datos en Firestore y descargar Excel *****
+// ***** RUTA ÚNICA: Guardar datos en Firestore (actualizar o agregar) y descargar Excel *****
 app.post('/guardar-y-descargar-excel', async (req, res) => {
     try {
         const formData = req.body;
+        console.log('\n--- Solicitud de guardado recibida ---');
+        console.log('Datos del formulario:', formData);
 
-        // Agrega una marca de tiempo a los datos
-        formData.timestamp = admin.firestore.FieldValue.serverTimestamp();
+        // Limpia y normaliza los campos clave para la búsqueda de duplicados
+        const normalizedNombre = formData.nombre ? formData.nombre.trim().toLowerCase() : '';
+        const normalizedApellido = formData.apellido ? formData.apellido.trim().toLowerCase() : '';
+        const normalizedDepartamento = formData.departamentoResidente ? formData.departamentoResidente.trim().toLowerCase() : '';
 
-        // Guarda los datos en Firestore
-        const docRef = await db.collection('formularios').add(formData);
-        console.log('Documento escrito con ID:', docRef.id);
+        let docIdToUpdate = null;
 
-        // --- Generar y enviar el Excel con TODOS los registros ---
+        // 1. Buscar duplicados en Firestore
+        // Nota: Firestore no permite consultas OR directas en un índice compuesto
+        // y las comparaciones de `toLowerCase()` deben hacerse en el cliente o en Cloud Functions.
+        // Aquí, buscaremos una coincidencia exacta de los campos normalizados.
+        const querySnapshot = await db.collection('formularios')
+            .where('nombre', '==', formData.nombre.trim()) // Usamos el valor original para la consulta
+            .where('apellido', '==', formData.apellido.trim())
+            .where('departamentoResidente', '==', formData.departamentoResidente.trim())
+            .limit(1) // Solo necesitamos encontrar uno si existe
+            .get();
+
+        if (!querySnapshot.empty) {
+            // Si se encuentra un documento, obtenemos su ID para actualizarlo
+            docIdToUpdate = querySnapshot.docs[0].id;
+            console.log(`[DEBUG] Duplicado encontrado en Firestore con ID: ${docIdToUpdate}. Actualizando registro existente.`);
+        } else {
+            console.log('[DEBUG] No se encontró duplicado en Firestore. Se agregará un nuevo registro.');
+        }
+
+        // Agrega una marca de tiempo de la última actualización
+        const dataToSave = {
+            ...formData,
+            timestamp: admin.firestore.FieldValue.serverTimestamp(), // Marca de tiempo de la última modificación
+            // Guarda también las versiones normalizadas para futuras búsquedas si se desea
+            normalizedNombre: normalizedNombre,
+            normalizedApellido: normalizedApellido,
+            normalizedDepartamento: normalizedDepartamento
+        };
+
+        if (docIdToUpdate) {
+            // Actualizar el documento existente
+            await db.collection('formularios').doc(docIdToUpdate).update(dataToSave);
+            console.log('Documento actualizado con ID:', docIdToUpdate);
+        } else {
+            // Agregar un nuevo documento
+            const docRef = await db.collection('formularios').add(dataToSave);
+            console.log('Nuevo documento agregado con ID:', docRef.id);
+        }
+
+        // --- Generar y enviar el Excel con TODOS los registros (actualizados o nuevos) ---
         const snapshot = await db.collection('formularios').orderBy('timestamp', 'asc').get(); // Ordena por marca de tiempo
         const data = snapshot.docs.map(doc => {
             const docData = doc.data();
@@ -60,19 +102,30 @@ app.post('/guardar-y-descargar-excel', async (req, res) => {
             if (docData.timestamp && typeof docData.timestamp.toDate === 'function') {
                 docData.timestamp = docData.timestamp.toDate().toLocaleString(); // Formatea la fecha para Excel
             }
+            // Elimina los campos normalizados si no quieres que aparezcan en el Excel final
+            delete docData.normalizedNombre;
+            delete docData.normalizedApellido;
+            delete docData.normalizedDepartamento;
             return docData;
         });
 
         if (data.length === 0) {
-            // Si no hay datos, puedes enviar un mensaje de error o un Excel vacío
             return res.status(404).json({ message: 'No hay registros para descargar.' });
         }
 
         // Convierte valores booleanos a 'Sí'/'No' y los modelos de coche a una cadena para mejor legibilidad en Excel
         const formattedData = data.map(row => ({
-            ...row,
-            mas21Anos: row.mas21Anos ? 'Sí' : 'No',
-            modelosCoches: Object.keys(row.modelosCoches || {}).filter(key => row.modelosCoches[key]).join(', ') || 'Ninguno'
+            'First Name': row.nombre || '',
+            'Last Name': row.apellido || '',
+            'Favorite Sport': row.deporteFavorito || '',
+            'Gender': row.genero || '',
+            'Departamento Residente': row.departamentoResidente || '',
+            '21 or Older': row.mas21Anos ? 'Sí' : 'No',
+            'Car: Vado': row.modelosCoches && row.modelosCoches.vado ? 'X' : '',
+            'Car: Chrysler': row.modelosCoches && row.modelosCoches.chrysler ? 'X' : '',
+            'Car: Toyota': row.modelosCoches && row.modelosCoches.toyota ? 'X' : '',
+            'Car: Nissan': row.modelosCoches && row.modelosCoches.nissan ? 'X' : '',
+            'Last Updated': row.timestamp || '' // Agrega la marca de tiempo de actualización
         }));
 
         const ws = XLSX.utils.json_to_sheet(formattedData);
