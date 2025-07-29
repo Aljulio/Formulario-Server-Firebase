@@ -40,8 +40,8 @@ app.use(cors({
 }));
 
 
-// ***** NUEVA RUTA: Solo guardar datos en Firestore *****
-app.post('/guardar-datos', async (req, res) => {
+// ***** RUTA ÚNICA: Guardar datos en Firestore y descargar Excel *****
+app.post('/guardar-y-descargar-excel', async (req, res) => {
     try {
         const formData = req.body;
 
@@ -52,16 +52,7 @@ app.post('/guardar-datos', async (req, res) => {
         const docRef = await db.collection('formularios').add(formData);
         console.log('Documento escrito con ID:', docRef.id);
 
-        res.status(200).json({ message: 'Datos guardados en Firestore exitosamente.', id: docRef.id });
-    } catch (error) {
-        console.error('Error al guardar los datos en Firestore:', error);
-        res.status(500).json({ message: 'Error al guardar los datos en Firestore.', error: error.message });
-    }
-});
-
-// ***** NUEVA RUTA: Descargar todos los registros como Excel *****
-app.get('/descargar-excel', async (req, res) => {
-    try {
+        // --- Generar y enviar el Excel con TODOS los registros ---
         const snapshot = await db.collection('formularios').orderBy('timestamp', 'asc').get(); // Ordena por marca de tiempo
         const data = snapshot.docs.map(doc => {
             const docData = doc.data();
@@ -73,6 +64,7 @@ app.get('/descargar-excel', async (req, res) => {
         });
 
         if (data.length === 0) {
+            // Si no hay datos, puedes enviar un mensaje de error o un Excel vacío
             return res.status(404).json({ message: 'No hay registros para descargar.' });
         }
 
@@ -89,21 +81,21 @@ app.get('/descargar-excel', async (req, res) => {
 
         const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' });
 
-        res.setHeader('Content-Disposition', 'attachment; filename=todos_los_registros_formulario.xlsx');
+        res.setHeader('Content-Disposition', 'attachment; filename=datos_formulario_actualizado.xlsx');
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.send(excelBuffer);
 
-        console.log('Archivo Excel con todos los registros enviado exitosamente.');
+        console.log('Datos guardados y archivo Excel actualizado enviado exitosamente.');
 
     } catch (error) {
-        console.error('Error al generar o enviar el Excel:', error);
-        res.status(500).json({ message: 'Error al generar o descargar el Excel.', error: error.message });
+        console.error('Error al guardar datos o generar Excel:', error);
+        res.status(500).json({ message: 'Error al procesar la solicitud.', error: error.message });
     }
 });
 
 // ***** RUTA DE BIENVENIDA (Opcional) *****
 app.get('/', (req, res) => {
-    res.send('¡Servidor Node.js con Express y Firebase funcionando en línea! Usa /guardar-datos para guardar y /descargar-excel para obtener el Excel.');
+    res.send('¡Servidor Node.js con Express y Firebase funcionando en línea! Usa /guardar-y-descargar-excel para guardar y obtener el Excel.');
 });
 
 // ***** INICIO DEL SERVIDOR *****
