@@ -41,7 +41,8 @@ app.use(cors({
     allowedHeaders: ['Content-Type'],
 }));
 
-// ***** RUTA ÚNICA: Guardar datos en Firestore (actualizar o agregar) y descargar Excel *****
+// ***** RUTA ÚNICA: Guardar datos en Firestore (actualizar o agregar) *****
+// Este endpoint ahora SOLO guarda datos, NO descarga el Excel automáticamente.
 app.post('/guardar-y-descargar-excel', async (req, res) => {
     try {
         const formData = req.body;
@@ -56,18 +57,14 @@ app.post('/guardar-y-descargar-excel', async (req, res) => {
         let docIdToUpdate = null;
 
         // 1. Buscar duplicados en Firestore
-        // Nota: Firestore no permite consultas OR directas en un índice compuesto
-        // y las comparaciones de `toLowerCase()` deben hacerse en el cliente o en Cloud Functions.
-        // Aquí, buscaremos una coincidencia exacta de los campos normalizados.
         const querySnapshot = await db.collection('formularios')
-            .where('nombre', '==', formData.nombre.trim()) // Usamos el valor original para la consulta
+            .where('nombre', '==', formData.nombre.trim())
             .where('apellido', '==', formData.apellido.trim())
             .where('departamentoResidente', '==', formData.departamentoResidente.trim())
-            .limit(1) // Solo necesitamos encontrar uno si existe
+            .limit(1)
             .get();
 
         if (!querySnapshot.empty) {
-            // Si se encuentra un documento, obtenemos su ID para actualizarlo
             docIdToUpdate = querySnapshot.docs[0].id;
             console.log(`[DEBUG] Duplicado encontrado en Firestore con ID: ${docIdToUpdate}. Actualizando registro existente.`);
         } else {
@@ -78,24 +75,35 @@ app.post('/guardar-y-descargar-excel', async (req, res) => {
         const dataToSave = {
             ...formData,
             timestamp: admin.firestore.FieldValue.serverTimestamp(), // Marca de tiempo de la última modificación
-            // Guarda también las versiones normalizadas para futuras búsquedas si se desea
             normalizedNombre: normalizedNombre,
             normalizedApellido: normalizedApellido,
             normalizedDepartamento: normalizedDepartamento
         };
 
         if (docIdToUpdate) {
-            // Actualizar el documento existente
             await db.collection('formularios').doc(docIdToUpdate).update(dataToSave);
             console.log('Documento actualizado con ID:', docIdToUpdate);
         } else {
-            // Agregar un nuevo documento
             const docRef = await db.collection('formularios').add(dataToSave);
             console.log('Nuevo documento agregado con ID:', docRef.id);
         }
 
-        // --- Generar y enviar el Excel con TODOS los registros (actualizados o nuevos) ---
-        const snapshot = await db.collection('formularios').orderBy('timestamp', 'asc').get(); // Ordena por marca de tiempo
+        // ¡IMPORTANTE! Ahora solo enviamos una respuesta de éxito, NO el archivo Excel.
+        res.status(200).json({ message: 'Datos guardados en Firestore con éxito.' });
+
+    } catch (error) {
+        console.error('Error al guardar datos en Firestore:', error);
+        res.status(500).json({ message: 'Error al procesar la solicitud de guardado.', error: error.message });
+    }
+});
+
+// ***** NUEVO ENDPOINT: Descargar Excel con todos los datos de Firestore *****
+app.get('/descargar-excel', async (req, res) => {
+    try {
+        console.log('\n--- Solicitud de descarga de Excel recibida ---');
+
+        // 1. Obtener todos los datos de Firestore
+        const snapshot = await db.collection('formularios').orderBy('timestamp', 'asc').get();
         const data = snapshot.docs.map(doc => {
             const docData = doc.data();
             // Convierte serverTimestamp a una cadena legible si existe
@@ -110,10 +118,10 @@ app.post('/guardar-y-descargar-excel', async (req, res) => {
         });
 
         if (data.length === 0) {
-            return res.status(404).json({ message: 'No hay registros para descargar.' });
+            return res.status(404).json({ message: 'No hay registros en la base de datos para descargar.' });
         }
 
-        // Convierte valores booleanos a 'Sí'/'No' y los modelos de coche a una cadena para mejor legibilidad en Excel
+        // 2. Formatear los datos para el Excel
         const formattedData = data.map(row => ({
             'First Name': row.nombre || '',
             'Last Name': row.apellido || '',
@@ -128,27 +136,30 @@ app.post('/guardar-y-descargar-excel', async (req, res) => {
             'Last Updated': row.timestamp || '' // Agrega la marca de tiempo de actualización
         }));
 
+        // 3. Generar el archivo Excel en memoria
         const ws = XLSX.utils.json_to_sheet(formattedData);
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, 'RegistrosFormulario');
 
         const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' });
 
+        // 4. Enviar el archivo Excel como respuesta
         res.setHeader('Content-Disposition', 'attachment; filename=datos_formulario_actualizado.xlsx');
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.send(excelBuffer);
 
-        console.log('Datos guardados y archivo Excel actualizado enviado exitosamente.');
+        console.log('Archivo Excel generado desde Firestore y enviado para descarga.');
 
     } catch (error) {
-        console.error('Error al guardar datos o generar Excel:', error);
-        res.status(500).json({ message: 'Error al procesar la solicitud.', error: error.message });
+        console.error('Error al generar o descargar el Excel desde Firestore:', error);
+        res.status(500).json({ message: 'Error al procesar la solicitud de descarga.', error: error.message });
     }
 });
 
+
 // ***** RUTA DE BIENVENIDA (Opcional) *****
 app.get('/', (req, res) => {
-    res.send('¡Servidor Node.js con Express y Firebase funcionando en línea! Usa /guardar-y-descargar-excel para guardar y obtener el Excel.');
+    res.send('¡Servidor Node.js con Express y Firebase funcionando en línea! Usa /guardar-y-descargar-excel para guardar y /descargar-excel para obtener el Excel.');
 });
 
 // ***** INICIO DEL SERVIDOR *****
