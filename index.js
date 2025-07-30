@@ -108,7 +108,7 @@ app.get('/descargar-excel', async (req, res) => {
             const docData = doc.data();
             // Convierte serverTimestamp a una cadena legible si existe
             if (docData.timestamp && typeof docData.timestamp.toDate === 'function') {
-                docData.timestamp = docData.timestamp.toDate().toLocaleString(); // Formatea la fecha para Excel
+                docData.timestamp = docData.timestamp.toDate().toLocaleString('es-GT', { timeZone: 'America/Guatemala' }); // ¡MODIFICADO: Zona horaria de Guatemala!
             }
             // Elimina los campos normalizados si no quieres que aparezcan en el Excel final
             delete docData.normalizedNombre;
